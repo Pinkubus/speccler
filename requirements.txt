@@ -1,0 +1,9 @@
+# Speccle - System Specification Detector
+# Required dependencies
+
+# Cross-platform system information
+psutil>=5.9.0
+
+# Windows-specific (for detailed hardware info)
+WMI>=1.5.1; sys_platform == 'win32'
+pywin32>=306; sys_platform == 'win32'
