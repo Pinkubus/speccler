@@ -8,6 +8,8 @@ import socket
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
+import sys
+import os
 
 # Cross-platform imports with fallbacks
 try:
@@ -34,8 +36,11 @@ class SystemInfoCollector:
     def collect_all(self) -> dict:
         """Collect all system specifications."""
         # Initialize COM for WMI on Windows (required for threading)
-        if HAS_WMI:
-            pythoncom.CoInitialize()
+        if HAS_WMI and platform.system() == 'Windows':
+            try:
+                pythoncom.CoInitialize()
+            except:
+                pass  # Already initialized
         
         try:
             self.specs = {
@@ -48,8 +53,11 @@ class SystemInfoCollector:
                 'system': self._get_system_info(),
             }
         finally:
-            if HAS_WMI:
-                pythoncom.CoUninitialize()
+            if HAS_WMI and platform.system() == 'Windows':
+                try:
+                    pythoncom.CoUninitialize()
+                except:
+                    pass
         
         return self.specs
     
@@ -87,8 +95,11 @@ class SystemInfoCollector:
         }
         
         if HAS_PSUTIL:
-            info['physical_cores'] = psutil.cpu_count(logical=False) or 0
-            info['logical_cores'] = psutil.cpu_count(logical=True) or 0
+            try:
+                info['physical_cores'] = psutil.cpu_count(logical=False) or 0
+                info['logical_cores'] = psutil.cpu_count(logical=True) or 0
+            except:
+                pass
             
             try:
                 freq = psutil.cpu_freq()
@@ -106,9 +117,22 @@ class SystemInfoCollector:
                     info['manufacturer'] = cpu.Manufacturer or ''
                     if cpu.MaxClockSpeed:
                         info['frequency'] = cpu.MaxClockSpeed
+                    # Get cores from WMI if not already set
+                    if info['physical_cores'] == 0 and cpu.NumberOfCores:
+                        info['physical_cores'] = cpu.NumberOfCores
+                    if info['logical_cores'] == 0 and cpu.NumberOfLogicalProcessors:
+                        info['logical_cores'] = cpu.NumberOfLogicalProcessors
                     break
             except:
                 pass
+        
+        # Fallback to os.cpu_count() if still no data
+        if info['logical_cores'] == 0:
+            import os
+            info['logical_cores'] = os.cpu_count() or 0
+            if info['physical_cores'] == 0:
+                # Assume physical cores is half of logical (common for hyperthreading)
+                info['physical_cores'] = info['logical_cores'] // 2 if info['logical_cores'] > 1 else info['logical_cores']
         
         return info
     
@@ -120,9 +144,25 @@ class SystemInfoCollector:
         }
         
         if HAS_PSUTIL:
-            mem = psutil.virtual_memory()
-            info['total'] = mem.total
-            info['available'] = mem.available
+            try:
+                mem = psutil.virtual_memory()
+                info['total'] = mem.total
+                info['available'] = mem.available
+            except:
+                pass
+        
+        # Windows WMI fallback for RAM
+        if info['total'] == 0 and HAS_WMI and platform.system() == 'Windows':
+            try:
+                c = wmi.WMI()
+                for os_info in c.Win32_OperatingSystem():
+                    if os_info.TotalVisibleMemorySize:
+                        info['total'] = int(os_info.TotalVisibleMemorySize) * 1024  # Convert KB to bytes
+                    if os_info.FreePhysicalMemory:
+                        info['available'] = int(os_info.FreePhysicalMemory) * 1024
+                    break
+            except:
+                pass
         
         return info
     
@@ -135,13 +175,21 @@ class SystemInfoCollector:
             try:
                 c = wmi.WMI()
                 for gpu in c.Win32_VideoController():
-                    gpu_info = {
-                        'name': gpu.Name or 'Unknown GPU',
-                        'vendor': gpu.AdapterCompatibility or '',
-                        'vram': gpu.AdapterRAM if gpu.AdapterRAM else 0,
-                    }
-                    gpus.append(gpu_info)
-            except:
+                    # Only add real GPUs (skip Microsoft Basic Display Adapter)
+                    if gpu.Name and 'Basic Display' not in gpu.Name and 'Basic Render' not in gpu.Name:
+                        # Handle VRAM - some GPUs report negative values or None
+                        vram = 0
+                        if gpu.AdapterRAM and gpu.AdapterRAM > 0:
+                            vram = gpu.AdapterRAM
+                        
+                        gpu_info = {
+                            'name': gpu.Name or 'Unknown GPU',
+                            'vendor': gpu.AdapterCompatibility or '',
+                            'vram': vram,
+                        }
+                        gpus.append(gpu_info)
+            except Exception as e:
+                # If WMI fails completely, will use fallback below
                 pass
         
         # Fallback for non-Windows or if WMI fails
